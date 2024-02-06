@@ -2,6 +2,6 @@
 k8s topd extends `kubectl top nodes`, adding ephemeral disk usage.
 
 ## Install
-Copy `kubectl-topd` to `/usr/local/bin`
-
-Run `kubectl topd`
+1. clone this repo
+2. `sudo cp kubectl-topd.sh /usr/local/bin/kubectl-topd`
+3. `kubectl topd`
