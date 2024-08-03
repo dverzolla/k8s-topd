@@ -7,7 +7,7 @@ THRESHOLD_PERCENTAGE = 80
 KUBECTL_COMMAND = "kubectl"
 
 # Terminal Color Codes
-COLOR = "\033[91m"
+COLOR = "\033[91m" # red
 COLOR_RESET = "\033[0m"
 
 def run_kubectl_command(command):
