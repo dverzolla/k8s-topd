@@ -3,11 +3,12 @@
 import subprocess
 import json
 import argparse
+import shlex
 
 THRESHOLD_PERCENTAGE = 80
 KUBECTL_COMMAND = "kubectl"
 
-COLOR = "\033[91m" # red
+COLOR = "\033[91m"  # red
 COLOR_RESET = "\033[0m"
 
 def run_kubectl_command(command):
@@ -35,7 +36,7 @@ def get_node_labels(node_name, requested_label_keys):
         label_values = [all_labels.get(key, "<none>") for key in requested_label_keys]
         return label_values
     except Exception as e:
-        print(f"Warning: Could not fetch labels for node {node_name}: {e}") 
+        print(f"Warning: Could not fetch labels for node {node_name}: {e}")
         return ["<error>"] * len(requested_label_keys)
 
 def is_colorization_needed(usage_percentage):
@@ -73,12 +74,24 @@ def print_node_metrics(node_name, cpu_cores, cpu_percentage, memory_bytes, memor
     print(" ".join(output_parts + label_display_parts))
 
 def main():
-    parser = argparse.ArgumentParser(description="Extends 'kubectl top nodes' to include ephemeral disk usage and customizable label columns.")
+    parser = argparse.ArgumentParser(
+        description="Extends 'kubectl top nodes' to include ephemeral disk usage and customizable label columns."
+    )
     parser.add_argument(
         "-L", "--label-columns",
         action="append",
         default=[],
-        help="Label (or comma-separated list) to display as a column. Can be specified multiple times (e.g., -L zone -L region) or as a comma-separated list (e.g., -L zone,region)." 
+        help=(
+            "Label (or comma-separated list) to display as a column. "
+            "Can be specified multiple times (e.g., -L zone -L region) or as a comma-separated list (e.g., -L zone,region)."
+        )
+    )
+    parser.add_argument(
+        "-l", "--selector",
+        help=(
+            "Label selector to filter nodes (behaves exactly like 'kubectl -l'). "
+            "Examples: -l env=prod  |  -l 'tier in (frontend,backend)'"
+        )
     )
     args = parser.parse_args()
 
@@ -102,9 +115,20 @@ def main():
         header_parts.append(f"{label_key.upper():<{label_col_w}}")
     print(" ".join(header_parts))
 
-    top_nodes_output = run_kubectl_command("top nodes --no-headers")
+    top_nodes_cmd = "top nodes --no-headers"
+    if args.selector:
+        # pass selector straight through to kubectl; shlex.quote ensures safe shell handling
+        top_nodes_cmd += f" -l {shlex.quote(args.selector)}"
+
+    top_nodes_output = run_kubectl_command(top_nodes_cmd)
+
+    if not top_nodes_output:
+        return
+
     for line in top_nodes_output.splitlines():
         parts = line.split()
+        if len(parts) < 5:
+            continue
         node_name = parts[0]
         cpu_cores = parts[1]
         cpu_percentage = parts[2]
@@ -113,7 +137,7 @@ def main():
 
         disk_usage = get_node_disk_usage(node_name)
         node_label_values = get_node_labels(node_name, requested_labels)
-        
+
         print_node_metrics(node_name, cpu_cores, cpu_percentage, memory_bytes, memory_percentage, disk_usage, node_label_values)
 
 if __name__ == "__main__":
