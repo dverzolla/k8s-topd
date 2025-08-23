@@ -171,6 +171,83 @@ def print_node_metrics(node_name, cpu_cores, cpu_percentage, memory_bytes, memor
 
     print(" ".join(output_parts + label_display_parts))
 
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9%]+", "", s.lower())
+
+_BUILTIN_COL_MAP = {
+    _norm("name"): "name",
+
+    # CPU
+    _norm("cpu(cores)"): "cpu_m",
+    _norm("cpucores"): "cpu_m",
+    _norm("cpu"): "cpu_m",
+    _norm("cpu%"): "cpu_perc",
+
+    # Memory
+    _norm("memory(bytes)"): "mem_bytes",
+    _norm("memory"): "mem_bytes",
+    _norm("mem"): "mem_bytes",
+    _norm("memory%"): "mem_perc",
+    _norm("mem%"): "mem_perc",
+
+    # Disk
+    _norm("disk usage%"): "disk_perc",
+    _norm("disk%"): "disk_perc",
+    _norm("disk"): "disk_perc",
+}
+
+def parse_order_by(spec: str, requested_labels):
+    if not spec:
+        return []
+
+    orders = []
+    for raw in spec.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+
+        m = re.match(r"^(.*?)(?::(asc|desc))?$", item, re.IGNORECASE)
+        col = (m.group(1) or "").strip()
+        direction = (m.group(2) or "asc").lower()
+        reverse = (direction == "desc")
+
+        ncol = _norm(col)
+
+        key = _BUILTIN_COL_MAP.get(ncol)
+        if key:
+            orders.append((key, reverse, None))
+            continue
+
+        label_match = None
+        for lk in requested_labels:
+            if _norm(lk) == ncol or lk == col:
+                label_match = lk
+                break
+        if label_match is not None:
+            orders.append(("label", reverse, label_match))
+            continue
+
+        for alias, builtin_key in _BUILTIN_COL_MAP.items():
+            if alias.startswith(ncol) or ncol.startswith(alias):
+                orders.append((builtin_key, reverse, None))
+                break
+
+    return orders
+
+def sort_rows_in_place(rows, order_specs):
+    if not order_specs:
+        return
+    for key, reverse, label_key in reversed(order_specs):
+        if key == "label":
+            rows.sort(key=lambda r: (r["labels"].get(label_key, "") or ""), reverse=reverse)
+        else:
+            def _k(r):
+                v = r.get(key, None)
+                if v is None:
+                    return float("-inf") if not reverse else float("inf")
+                return v
+            rows.sort(key=_k, reverse=reverse)
+
 def main():
     parser = argparse.ArgumentParser(
         description="Top nodes via API server (kubectl proxy), with ephemeral disk and customizable label columns."
@@ -186,6 +263,13 @@ def main():
         "-l", "--selector",
         help=("Label selector to filter nodes (behaves like 'kubectl -l'). "
               "Examples: -l env=prod  |  -l 'nodepool in (blue,green)'")
+    )
+    parser.add_argument(
+        "-O", "--order-by",
+        help=("Order rows by column(s). Comma-separated. "
+              "Use :asc or :desc (default asc). "
+              "Examples: -O 'CPU%%:desc'  |  -O 'group:asc,CPU%%:desc'. "
+              "Valid columns: name, cpu(cores), cpu%%, memory(bytes), memory%%, disk%%, and any -L label key.")
     )
     parser.add_argument(
         "--proxy-url",
@@ -206,6 +290,7 @@ def main():
     )
     args = parser.parse_args()
 
+    # parse -L columns
     requested_labels = []
     for item in args.label_columns:
         requested_labels.extend([label.strip() for label in item.split(',') if label.strip()])
@@ -234,6 +319,9 @@ def main():
 
     nodes_json = list_nodes(session, base_url, args.selector, args.timeout)
     items = nodes_json.get("items", [])
+    if not items:
+        return
+
     node_names = []
     labels_by_node = {}
     cpu_capacity_m = {}
@@ -247,19 +335,15 @@ def main():
             continue
         node_names.append(name)
         labels_by_node[name] = meta.get("labels", {}) or {}
-
         cap = status.get("capacity", {}) or {}
         cpu_capacity_m[name] = parse_cpu_to_millicores(cap.get("cpu", "0"))
         mem_capacity_bytes[name] = parse_memory_to_bytes(cap.get("memory", "0"))
 
-    if not node_names:
-        return
-
     selected = set(node_names)
 
+    # metrics 
     metrics_json = list_node_metrics(session, base_url, args.timeout)
     metrics_items = metrics_json.get("items", [])
-
     cpu_used_m = {}
     mem_used_bytes = {}
     for it in metrics_items:
@@ -271,6 +355,7 @@ def main():
         cpu_used_m[name] = parse_cpu_to_millicores(usage.get("cpu", "0"))
         mem_used_bytes[name] = parse_memory_to_bytes(usage.get("memory", "0"))
 
+    # disk (concurrent)
     disk_usage = {}
     max_workers = max(1, min(args.concurrency, len(node_names)))
     futures = {}
@@ -281,28 +366,44 @@ def main():
             n = futures[fut]
             try:
                 disk_usage[n] = float(fut.result())
-            except Exception as e:
+            except Exception:
                 disk_usage[n] = 0.0
 
+    # sorting
+    rows = []
     for name in node_names:
         used_m = cpu_used_m.get(name, 0)
-        cpu_cores_str = f"{used_m}m"
-
-        cap_m = cpu_capacity_m.get(name, 0) or 1  # avoid div by zero
-        cpu_perc = int(round((used_m / cap_m) * 100))
-        cpu_perc_str = f"{cpu_perc}%"
+        cap_m = cpu_capacity_m.get(name, 0) or 1
+        cpu_perc = (used_m / cap_m) * 100.0
 
         mem_used = mem_used_bytes.get(name, 0)
-        mem_bytes_str = f"{mem_used}"
         mem_cap = mem_capacity_bytes.get(name, 0) or 1
-        mem_perc = int(round((mem_used / mem_cap) * 100))
-        mem_perc_str = f"{mem_perc}%"
+        mem_perc = (mem_used / mem_cap) * 100.0
 
-        disk = float(disk_usage.get(name, 0.0))
+        rows.append({
+            "name": name,
+            "cpu_m": float(used_m),
+            "cpu_perc": float(cpu_perc),
+            "mem_bytes": float(mem_used),
+            "mem_perc": float(mem_perc),
+            "disk_perc": float(disk_usage.get(name, 0.0)),
+            "labels": labels_by_node.get(name, {}),
+        })
+
+    order_specs = parse_order_by(args.order_by, requested_labels)
+    sort_rows_in_place(rows, order_specs)
+
+    for r in rows:
+        name = r["name"]
+        cpu_cores_str = f"{int(r['cpu_m'])}m"
+        cpu_perc_str = f"{int(round(r['cpu_perc']))}%"
+        mem_bytes_str = f"{int(r['mem_bytes'])}"
+        mem_perc_str = f"{int(round(r['mem_perc']))}%"
+        disk = r["disk_perc"]
 
         label_values = []
         if requested_labels:
-            all_labels = labels_by_node.get(name, {})
+            all_labels = r["labels"]
             label_values = [all_labels.get(k, "<none>") for k in requested_labels]
 
         print_node_metrics(name, cpu_cores_str, cpu_perc_str, mem_bytes_str, mem_perc_str, disk, label_values)
