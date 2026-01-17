@@ -5,6 +5,7 @@ import argparse
 import re
 import time
 import atexit
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -119,6 +120,15 @@ def http_get_json(session: requests.Session, url: str, timeout: float, params=No
     r.raise_for_status()
     return r.json()
 
+def http_get_json_safe(session: requests.Session, url: str, timeout: float, params=None):
+    """Safe version of http_get_json that returns None on error instead of raising"""
+    try:
+        r = session.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
 def list_nodes(session, base_url, selector, timeout):
     url = f"{base_url}/api/v1/nodes"
     params = {"labelSelector": selector} if selector else None
@@ -126,16 +136,21 @@ def list_nodes(session, base_url, selector, timeout):
 
 def list_node_metrics(session, base_url, timeout):
     url = f"{base_url}/apis/metrics.k8s.io/v1beta1/nodes"
-    return http_get_json(session, url, timeout)
+    return http_get_json_safe(session, url, timeout)
 
 def fetch_node_disk_usage(session, base_url, node_name, timeout):
     url = f"{base_url}/api/v1/nodes/{node_name}/proxy/stats/summary"
-    data = http_get_json(session, url, timeout)
-    used = data["node"]["fs"]["usedBytes"]
-    cap = data["node"]["fs"]["capacityBytes"]
-    if cap == 0:
+    data = http_get_json_safe(session, url, timeout)
+    if data is None:
         return 0.0
-    return (used / cap) * 100.0
+    try:
+        used = data["node"]["fs"]["usedBytes"]
+        cap = data["node"]["fs"]["capacityBytes"]
+        if cap == 0:
+            return 0.0
+        return (used / cap) * 100.0
+    except (KeyError, TypeError, ZeroDivisionError):
+        return 0.0
 
 def is_colorization_needed(usage_percentage):
     return usage_percentage > THRESHOLD_PERCENTAGE
@@ -343,17 +358,21 @@ def main():
 
     # metrics 
     metrics_json = list_node_metrics(session, base_url, args.timeout)
-    metrics_items = metrics_json.get("items", [])
     cpu_used_m = {}
     mem_used_bytes = {}
-    for it in metrics_items:
-        meta = it.get("metadata", {}) or {}
-        name = meta.get("name")
-        if not name or name not in selected:
-            continue
-        usage = it.get("usage", {}) or {}
-        cpu_used_m[name] = parse_cpu_to_millicores(usage.get("cpu", "0"))
-        mem_used_bytes[name] = parse_memory_to_bytes(usage.get("memory", "0"))
+    
+    if metrics_json is not None:
+        metrics_items = metrics_json.get("items", [])
+        for it in metrics_items:
+            meta = it.get("metadata", {}) or {}
+            name = meta.get("name")
+            if not name or name not in selected:
+                continue
+            usage = it.get("usage", {}) or {}
+            cpu_used_m[name] = parse_cpu_to_millicores(usage.get("cpu", "0"))
+            mem_used_bytes[name] = parse_memory_to_bytes(usage.get("memory", "0"))
+    else:
+        print("Warning: Unable to fetch node metrics. CPU and memory usage will show as 0%", file=sys.stderr)
 
     # disk (concurrent)
     disk_usage = {}
