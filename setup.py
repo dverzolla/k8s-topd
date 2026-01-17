@@ -10,6 +10,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/dverzolla/k8s-topd",
     packages=find_packages(),
+    py_modules=["k8s_topd"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
@@ -24,7 +25,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "k8s-topd=kubectl-topd:main",
+            "k8s-topd=k8s_topd:main",
         ],
     },
 )

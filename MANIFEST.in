@@ -1,2 +1,2 @@
 include README.md
-include kubectl-topd.py
+include k8s_topd.py
