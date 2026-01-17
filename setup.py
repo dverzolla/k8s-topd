@@ -24,7 +24,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "k8s-topd=kubectl_topd.kubectl_topd:main",
+            "k8s-topd=kubectl-topd:main",
         ],
     },
 )
