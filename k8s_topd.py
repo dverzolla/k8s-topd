@@ -416,7 +416,8 @@ def main():
         name = r["name"]
         cpu_cores_str = f"{int(r['cpu_m'])}m"
         cpu_perc_str = f"{int(round(r['cpu_perc']))}%"
-        mem_bytes_str = f"{int(r['mem_bytes'])}"
+        mem_mib = r['mem_bytes'] / (1024 ** 2)
+        mem_bytes_str = f"{int(mem_mib)}Mi"
         mem_perc_str = f"{int(round(r['mem_perc']))}%"
         disk = r["disk_perc"]
 
